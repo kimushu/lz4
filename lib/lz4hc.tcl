@@ -54,8 +54,6 @@ set LZ4HC_HASH_MASK [ expr ($LZ4HC_HASHTABLESIZE - 1) ]
 # include lz4.c
 #
 
-set LZ4_MAX_INPUT_SIZE 0x7e000000
-
 proc LZ4_read8 { Pptr } {
 	global HEAP_IN8
 	return $HEAP_IN8($Pptr)
@@ -85,7 +83,7 @@ proc LZ4_memmove { Pdest Psrc n } {
 		set HEAP_OUT8($Pdest) [ expr ($v >> 24) & 0xff ]; incr Pdest
 		set HEAP_OUT8($Pdest) [ expr ($v >> 16) & 0xff ]; incr Pdest
 		set HEAP_OUT8($Pdest) [ expr ($v >>  8) & 0xff ]; incr Pdest
-		set HEAP_OUT8($Pdest) [ expr ($v >>  0) & 0xff ]; incr Pdest
+		set HEAP_OUT8($Pdest) [ expr  $v        & 0xff ]; incr Pdest
 	}
 	if { $n > 0 } {
 		set v $HEAP_IN32($Psrc)
@@ -153,75 +151,69 @@ proc LZ4HC_hashPtr { Pptr } {
 
 proc LZ4HC_init_g {} {
 	global LZ4HC_HASHTABLESIZE LZ4HC_MAXD
-	global Ahc4 AhashTable AchainTable
+	global LZ4_nextToUpdate LZ4_hashTable LZ4_chainTable
 
-	array set Ahc4 [ list \
-		nextToUpdate    65536 \
-		Pbase           -65536 \
-		Pend            0 \
-	]
+	set LZ4_nextToUpdate 0x10000
 
-	array set AhashTable [ list ]
+	array set LZ4_hashTable [ list ]
 	for { set i 0 } { $i < $LZ4HC_HASHTABLESIZE } { incr i } {
-		set AhashTable($i) 0
+		set LZ4_hashTable($i) 0
 	}
 
-	array set AchainTable [ list ]
+	array set LZ4_chainTable [ list ]
 	for { set i 0 } { $i < $LZ4HC_MAXD } { incr i } {
-		set AchainTable($i) 65535
+		set LZ4_chainTable($i) 0xffff
 	}
 	return {}
 }
 
 proc LZ4HC_free_g {} {
-	global Ahc4 AhashTable AchainTable
-	array unset Ahc4
-	array unset AhashTable
-	array unset AchainTable
+	global LZ4_nextToUpdate LZ4_hashTable LZ4_chainTable
+	unset LZ4_nextToUpdate
+	array unset LZ4_hashTable
+	array unset LZ4_chainTable
 	return {}
 }
 
 proc LZ4HC_Insert_g { Pip } {
-	global Ahc4 AhashTable AchainTable
+	global LZ4_nextToUpdate LZ4_hashTable LZ4_chainTable
 
-	set Pbase $Ahc4(Pbase)
-	set target [ expr $Pip - $Pbase ]
-	set idx $Ahc4(nextToUpdate)
+	set target [ expr $Pip + 0x10000 ]
+	set idx $LZ4_nextToUpdate
 
 	while { $idx < $target } {
-		set h [ LZ4HC_hashPtr [ expr $Pbase + $idx ] ]
-		set delta [ expr $idx - $AhashTable($h) ]
-		if { $delta > 65535 } { set delta 65535 }
-		set AchainTable([ expr $idx & 0xffff ]) [ expr $delta & 0xffff ]
-		set AhashTable($h) [ expr $idx & 0xffffffff ]
+		set h [ LZ4HC_hashPtr [ expr $idx - 0x10000 ] ]
+		set delta [ expr $idx - $LZ4_hashTable($h) ]
+		if { $delta > 0xffff } { set delta 0xffff }
+		set LZ4_chainTable([ expr $idx & 0xffff ]) [ expr $delta & 0xffff ]
+		set LZ4_hashTable($h) [ expr $idx & 0xffffffff ]
 		incr idx
 	}
 
-	set Ahc4(nextToUpdate) $target
+	set LZ4_nextToUpdate $target
 	return {}
 }
 
 proc LZ4HC_InsertAndFindBestMatch_g { Pip PiLimit RPmatchpos maxNbAttempts } {
-	global Ahc4 AhashTable AchainTable
+	global LZ4_hashTable LZ4_chainTable
 	upvar $RPmatchpos Pmatchpos
 
-	set Pbase $Ahc4(Pbase)
-	if { 131072 > ($Pip - $Pbase) } {
-		set lowLimit 65536
+	if { 0x10000 > $Pip } {
+		set lowLimit 0x10000
 	} else {
-		set lowLimit [ expr ($Pip - $Pbase) - (65536 - 1) ]
+		set lowLimit [ expr $Pip + 1 ]
 	}
 	set nbAttempts $maxNbAttempts
 	set ml 0
 
 	# HC4 match finder
 	LZ4HC_Insert_g $Pip
-	set matchIndex $AhashTable([ LZ4HC_hashPtr $Pip ])
+	set matchIndex $LZ4_hashTable([ LZ4HC_hashPtr $Pip ])
 
 	while { ($matchIndex >= $lowLimit) && ($nbAttempts) } {
 		incr nbAttempts -1
-		if { $matchIndex >= 65536 } {
-			set Pmatch [ expr $Pbase + $matchIndex ]
+		if { $matchIndex >= 0x10000 } {
+			set Pmatch [ expr $matchIndex - 0x10000 ]
 			if { ( [ LZ4_read8o $Pmatch $ml ] == [ LZ4_read8o $Pip $ml ] ) \
 				&& ( [ LZ4_read32 $Pmatch ] == [ LZ4_read32 $Pip ] ) } {
 				set mlt [ expr [ LZ4_count [ expr $Pip + 4 ] \
@@ -229,20 +221,19 @@ proc LZ4HC_InsertAndFindBestMatch_g { Pip PiLimit RPmatchpos maxNbAttempts } {
 				if { $mlt > $ml } { set ml $mlt; set Pmatchpos $Pmatch }
 			}
 		} else {
-			set Pmatch [ expr $matchIndex - 65536 ]
+			set Pmatch [ expr $matchIndex - 0x10000 ]
 			if { [ LZ4_read32 $Pmatch ] == [ LZ4_read32 $Pip ] } {
-				set mlt {}
-				set PvLimit [ expr $Pip + (65536 - $matchIndex) ]
+				set PvLimit [ expr $Pip + (0x10000 - $matchIndex) ]
 				if { $PvLimit > $PiLimit } { set PvLimit $PiLimit }
 				set mlt [ expr [ LZ4_count [ expr $Pip + 4 ] \
 					[ expr $Pmatch + 4 ] $PvLimit ] + 4 ]
 				if { $mlt > $ml } {
 					set ml $mlt
-					set Pmatchpos [ expr $Pbase + $matchIndex ]
+					set Pmatchpos [ expr $matchIndex - 0x10000 ]
 				}
 			}
 		}
-		incr matchIndex -$AchainTable([ expr $matchIndex & 0xffff ])
+		incr matchIndex -$LZ4_chainTable([ expr $matchIndex & 0xffff ])
 	}
 
 	return $ml
@@ -250,27 +241,25 @@ proc LZ4HC_InsertAndFindBestMatch_g { Pip PiLimit RPmatchpos maxNbAttempts } {
 
 proc LZ4HC_InsertAndGetWiderMatch_g { Pip PiLowLimit PiHighLimit longest \
 	RPmatchpos RPstartpos maxNbAttempts } {
-	global Ahc4 AhashTable AchainTable
+	global LZ4_hashTable LZ4_chainTable
 	upvar $RPmatchpos Pmatchpos $RPstartpos Pstartpos
 
-	set Pbase $Ahc4(Pbase)
-	set PlowPrefixPtr [ expr $Pbase + 65536 ]
-	if { 131072 > ($Pip - $Pbase) } {
-		set lowLimit 65536
+	if { 0x10000 > $Pip } {
+		set lowLimit 0x10000
 	} else {
-		set lowLimit [ expr $Pip - $Pbase ]
+		set lowLimit [ expr $Pip + 0x10000 ]
 	}
 	set nbAttempts $maxNbAttempts
 	set delta [ expr $Pip - $PiLowLimit ]
 
 	# First Match
 	LZ4HC_Insert_g $Pip
-	set matchIndex $AhashTable([ LZ4HC_hashPtr $Pip ])
+	set matchIndex $LZ4_hashTable([ LZ4HC_hashPtr $Pip ])
 
 	while { ($matchIndex >= $lowLimit) && ($nbAttempts) } {
 		incr nbAttempts -1
-		if { $matchIndex >= 65536 } {
-			set PmatchPtr [ expr $Pbase + $matchIndex ]
+		if { $matchIndex >= 0x10000 } {
+			set PmatchPtr [ expr $matchIndex - 0x10000 ]
 			if { [ LZ4_read8o $PiLowLimit $longest ] == \
 				[ LZ4_read8 [ expr $PmatchPtr - $delta + $longest ] ] } {
 				if { [ LZ4_read32 $PmatchPtr ] == [ LZ4_read32 $Pip ] } {
@@ -280,7 +269,7 @@ proc LZ4HC_InsertAndGetWiderMatch_g { Pip PiLowLimit PiHighLimit longest \
 					set back 0
 
 					while { (($Pip + $back) > $PiLowLimit) \
-						&& (($PmatchPtr + $back) > $PlowPrefixPtr) \
+						&& (($PmatchPtr + $back) > 0) \
 						&& ( [ LZ4_read8 [ expr $Pip + $back - 1 ] ] == \
 							[ LZ4_read8 [ expr $PmatchPtr + $back - 1 ] ] ) } {
 						incr back -1
@@ -296,16 +285,15 @@ proc LZ4HC_InsertAndGetWiderMatch_g { Pip PiLowLimit PiHighLimit longest \
 				}
 			}
 		} else {
-			set PmatchPtr [ expr $matchIndex - 65536 ]
+			set PmatchPtr [ expr $matchIndex - 0x10000 ]
 			if { [ LZ4_read32 $PmatchPtr ] == [ LZ4_read32 $Pip ] } {
 				set back 0
-				set PvLimit [ expr $Pip + 65536 - $matchIndex ]
+				set PvLimit [ expr $Pip + 0x10000 - $matchIndex ]
 				if { $PvLimit > $PiHighLimit } { set PvLimit $PiHighLimit }
 				set mlt [ expr [ LZ4_count [ expr $Pip + 4 ] \
 					[ expr $PmatchPtr + 4 ] $PvLimit ] + 4 ]
 				if { (($Pip + $mlt) == $PvLimit) && ($PvLimit < $PiHighLimit) } {
-					incr mlt [ LZ4_count [ expr $Pip + $mlt ] \
-						[ expr $Pbase + 65536 ] $PiHighLimit ]
+					incr mlt [ LZ4_count [ expr $Pip + $mlt ] 0 $PiHighLimit ]
 				}
 				while { (($Pip + $back) > $PiLowLimit) \
 					&& (($matchIndex + $back) > $lowLimit) \
@@ -316,12 +304,12 @@ proc LZ4HC_InsertAndGetWiderMatch_g { Pip PiLowLimit PiHighLimit longest \
 				set mlt [ expr $mlt - $back ]
 				if { $mlt > $longest } {
 					set longest $mlt
-					set Pmatchpos [ expr $Pbase + $matchIndex + $back ]
+					set Pmatchpos [ expr $matchIndex - 0x10000 + $back ]
 					set Pstartpos [ expr $Pip + $back ]
 				}
 			}
 		}
-		incr matchIndex -$AchainTable([ expr $matchIndex & 0xffff ])
+		incr matchIndex -$LZ4_chainTable([ expr $matchIndex & 0xffff ])
 	}
 
 	return $longest
@@ -337,7 +325,7 @@ proc LZ4HC_encodeSequence_nl { RPip RPop RPanchor matchLength Pmatch } {
 	set length [ expr $Pip - $Panchor ]
 	set Ptoken $Pop; incr Pop
 	if { $length >= 15 } {
-		set token [ expr 15 << 4 ]
+		set token 0xf0
 		set len [ expr $length - 15 ]
 		for {} { $len > 254 } { incr len -255 } {
 			LZ4_write8 $Pop 255; incr Pop
@@ -381,7 +369,6 @@ proc LZ4HC_encodeSequence_nl { RPip RPop RPanchor matchLength Pmatch } {
 
 proc LZ4HC_compress_generic_g_nl { inputSize compressionLevel } {
 	global LZ4HC_MAX_CLEVEL LZ4HC_DEFAULT_CLEVEL
-	upvar #0 Ahc4 Actx
 
 	set Pip 0
 	set Panchor $Pip
@@ -405,7 +392,6 @@ proc LZ4HC_compress_generic_g_nl { inputSize compressionLevel } {
 	if { $compressionLevel > $LZ4HC_MAX_CLEVEL } { set compressionLevel $LZ4HC_MAX_CLEVEL }
 	if { $compressionLevel < 1 } { set compressionLevel $LZ4HC_DEFAULT_CLEVEL }
 	set maxNbAttempts [ expr 1 << ($compressionLevel - 1) ]
-	incr Actx(Pend) $inputSize
 
 	incr Pip
 
