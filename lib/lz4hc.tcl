@@ -625,3 +625,61 @@ proc LZ4_compress { src { compressionLevel 0 } } {
 	return $result
 }
 
+proc LZ4_decompress { src } {
+	set srcSize [ string length $src ]
+	set dest {}
+
+	for { set ip 0 } { $ip < $srcSize } {} {
+		binary scan [ string range $src $ip $ip ] c token
+		incr ip
+
+		# Read literal length
+		set ll [ expr ($token >> 4) & 15 ]
+		if { $ll == 15 } {
+			while { 1 } {
+				binary scan [ string range $src $ip $ip ] c el
+				incr ip
+				set el [ expr $el & 255 ]
+				incr ll $el
+				if { $el < 255 } { break }
+			}
+		}
+
+		# Read leterals
+		if { $ll > 0 } {
+			set dest $dest[ string range $src $ip [ expr $ip + $ll - 1 ] ]
+			incr ip $ll
+		}
+
+		if { $ip >= $srcSize } { break }
+
+		# Read offset
+		binary scan [ string range $src $ip [ expr $ip + 1 ] ] s ofs
+		incr ip 2
+		if { $ofs == 0 } {
+			puts stderr "Error"
+			return {}
+		}
+
+		# Read match length
+		set ml [ expr ($token & 15) + 4 ]
+		if { $ml == 19 } {
+			while { 1 } {
+				binary scan [ string range $src $ip $ip ] c el
+				incr ip
+				set el [ expr $el & 255 ]
+				incr ml $el
+				if { $el < 255 } { break }
+			}
+		}
+
+		# Combine match data
+		set j [ expr [ string length $dest ] - ($ofs & 65535) ]
+		for { set i 0 } { $i < $ml } { incr i; incr j } {
+			set dest $dest[ string range $dest $j $j ]
+		}
+	}
+
+	return $dest
+}
+
