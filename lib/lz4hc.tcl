@@ -247,7 +247,7 @@ proc LZ4HC_InsertAndGetWiderMatch_g { Pip PiLowLimit PiHighLimit longest \
 	if { 0x10000 > $Pip } {
 		set lowLimit 0x10000
 	} else {
-		set lowLimit [ expr $Pip + 0x10000 ]
+		set lowLimit [ expr $Pip + 1 ]
 	}
 	set nbAttempts $maxNbAttempts
 	set delta [ expr $Pip - $PiLowLimit ]
