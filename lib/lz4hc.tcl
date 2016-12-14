@@ -37,23 +37,6 @@
 #--------------------------------------------------------------------------------
 
 #--------------------------------------------------------------------------------
-# Standard library
-#
-proc memcpy { Pdest Psrc n } {
-	global HEAP
-	if { $n > 0 } {
-		set dofs [ expr $Pdest * 2 ]
-		set sofs [ expr $Psrc * 2 ]
-		set n2 [ expr $n * 2 - 1 ]
-		set HEAP [ string replace $HEAP $dofs [ expr $dofs + $n2 ] \
-			[ string range $HEAP $sofs [ expr $sofs + $n2 ] ] ]
-	}
-	return $Pdest
-}
-
-# set LZ4HC_HEAPMODE 0
-
-#--------------------------------------------------------------------------------
 # include lz4hc.h
 #
 set LZ4HC_DEFAULT_CLEVEL 9
@@ -70,29 +53,17 @@ set LZ4HC_HASH_MASK [ expr ($LZ4HC_HASHTABLESIZE - 1) ]
 #--------------------------------------------------------------------------------
 # include lz4.c
 #
-set MINMATCH 4
-
-set WILDCOPYLENGTH 8
-set LASTLITERALS 5
-set MFLIMIT [ expr $WILDCOPYLENGTH + $MINMATCH ]
-
-set MAXD_LOG 16
-set MAX_DISTANCE [ expr ((1 << $MAXD_LOG) - 1) ]
-
-set ML_BITS 4
-set ML_MASK [ expr (1 << $ML_BITS) - 1 ]
-set RUN_BITS [ expr 8 - $ML_BITS ]
-set RUN_MASK [ expr (1 << $RUN_BITS) - 1 ]
 
 set LZ4_MAX_INPUT_SIZE 0x7e000000
 
 proc LZ4_read8 { Pptr } {
-	global HEAP_IN32
-	return [ expr $HEAP_IN32($Pptr) >> 24 ]
+	global HEAP_IN8
+	return $HEAP_IN8($Pptr)
 }
 
 proc LZ4_read8o { Pptr ofs } {
-	return [ LZ4_read8 [ expr $Pptr + $ofs ] ]
+	global HEAP_IN8
+	return $HEAP_IN8([ expr $Pptr + $ofs ])
 }
 
 proc LZ4_read16 { Pptr } {
@@ -171,25 +142,13 @@ proc LZ4_count { Pin Pmatch PinLimit } {
 	return [ expr $Pin - $Pstart ]
 }
 
-proc LZ4_compressBound { isize } {
-	global LZ4_MAX_INPUT_SIZE
-	if { $isize > $LZ4_MAX_INPUT_SIZE } {
-		return 0
-	} else {
-		return [ expr $isize + ($isize / 255) + 16 ]
-	}
-}
-
 #--------------------------------------------------------------------------------
 # lz4hc.c
 #
-set OPTIMAL_ML [ expr ($ML_MASK - 1) + $MINMATCH ]
 
 proc LZ4HC_hashPtr { Pptr } {
-	global MINMATCH LZ4HC_HASH_LOG LZ4HC_HASH_MASK
-	set i [ LZ4_read32 $Pptr ]
-	return [ expr ((($i * 2654435761)) \
-		>> (($MINMATCH * 8) - $LZ4HC_HASH_LOG)) & $LZ4HC_HASH_MASK ]
+	global HEAP_IN32
+	return [ expr (($HEAP_IN32($Pptr) * 2654435761) >> 17) & 32767 ]
 }
 
 proc LZ4HC_init_g {} {
@@ -200,9 +159,6 @@ proc LZ4HC_init_g {} {
 		nextToUpdate    65536 \
 		Pbase           -65536 \
 		Pend            0 \
-		PdictBase       -65536 \
-		dictLimit       65536 \
-		lowLimit        65536 \
 	]
 
 	array set AhashTable [ list ]
@@ -226,7 +182,6 @@ proc LZ4HC_free_g {} {
 }
 
 proc LZ4HC_Insert_g { Pip } {
-	global MAX_DISTANCE
 	global Ahc4 AhashTable AchainTable
 
 	set Pbase $Ahc4(Pbase)
@@ -236,7 +191,7 @@ proc LZ4HC_Insert_g { Pip } {
 	while { $idx < $target } {
 		set h [ LZ4HC_hashPtr [ expr $Pbase + $idx ] ]
 		set delta [ expr $idx - $AhashTable($h) ]
-		if { $delta > $MAX_DISTANCE } { set delta $MAX_DISTANCE }
+		if { $delta > 65535 } { set delta 65535 }
 		set AchainTable([ expr $idx & 0xffff ]) [ expr $delta & 0xffff ]
 		set AhashTable($h) [ expr $idx & 0xffffffff ]
 		incr idx
@@ -247,19 +202,15 @@ proc LZ4HC_Insert_g { Pip } {
 }
 
 proc LZ4HC_InsertAndFindBestMatch_g { Pip PiLimit RPmatchpos maxNbAttempts } {
-	global MINMATCH
 	global Ahc4 AhashTable AchainTable
 	upvar $RPmatchpos Pmatchpos
 
 	set Pbase $Ahc4(Pbase)
-	set PdictBase $Ahc4(PdictBase)
-	set dictLimit $Ahc4(dictLimit)
-	if { ($Ahc4(lowLimit) + 65536) > ($Pip - $Pbase) } {
-		set lowLimit $Ahc4(lowLimit)
+	if { 131072 > ($Pip - $Pbase) } {
+		set lowLimit 65536
 	} else {
 		set lowLimit [ expr ($Pip - $Pbase) - (65536 - 1) ]
 	}
-	set matchIndex {}
 	set nbAttempts $maxNbAttempts
 	set ml 0
 
@@ -269,22 +220,22 @@ proc LZ4HC_InsertAndFindBestMatch_g { Pip PiLimit RPmatchpos maxNbAttempts } {
 
 	while { ($matchIndex >= $lowLimit) && ($nbAttempts) } {
 		incr nbAttempts -1
-		if { $matchIndex >= $dictLimit } {
+		if { $matchIndex >= 65536 } {
 			set Pmatch [ expr $Pbase + $matchIndex ]
 			if { ( [ LZ4_read8o $Pmatch $ml ] == [ LZ4_read8o $Pip $ml ] ) \
 				&& ( [ LZ4_read32 $Pmatch ] == [ LZ4_read32 $Pip ] ) } {
-				set mlt [ expr [ LZ4_count [ expr $Pip + $MINMATCH ] \
-					[ expr $Pmatch + $MINMATCH ] $PiLimit ] + $MINMATCH ]
+				set mlt [ expr [ LZ4_count [ expr $Pip + 4 ] \
+					[ expr $Pmatch + 4 ] $PiLimit ] + 4 ]
 				if { $mlt > $ml } { set ml $mlt; set Pmatchpos $Pmatch }
 			}
 		} else {
-			set Pmatch [ expr $PdictBase + $matchIndex ]
+			set Pmatch [ expr $matchIndex - 65536 ]
 			if { [ LZ4_read32 $Pmatch ] == [ LZ4_read32 $Pip ] } {
 				set mlt {}
-				set PvLimit [ expr $Pip + ($dictLimit - $matchIndex) ]
+				set PvLimit [ expr $Pip + (65536 - $matchIndex) ]
 				if { $PvLimit > $PiLimit } { set PvLimit $PiLimit }
-				set mlt [ expr [ LZ4_count [ expr $Pip + $MINMATCH ] \
-					[ expr $Pmatch + $MINMATCH ] $PvLimit ] + $MINMATCH ]
+				set mlt [ expr [ LZ4_count [ expr $Pip + 4 ] \
+					[ expr $Pmatch + 4 ] $PvLimit ] + 4 ]
 				if { $mlt > $ml } {
 					set ml $mlt
 					set Pmatchpos [ expr $Pbase + $matchIndex ]
@@ -299,20 +250,16 @@ proc LZ4HC_InsertAndFindBestMatch_g { Pip PiLimit RPmatchpos maxNbAttempts } {
 
 proc LZ4HC_InsertAndGetWiderMatch_g { Pip PiLowLimit PiHighLimit longest \
 	RPmatchpos RPstartpos maxNbAttempts } {
-	global MINMATCH
 	global Ahc4 AhashTable AchainTable
 	upvar $RPmatchpos Pmatchpos $RPstartpos Pstartpos
 
 	set Pbase $Ahc4(Pbase)
-	set dictLimit $Ahc4(dictLimit)
-	set PlowPrefixPtr [ expr $Pbase + $dictLimit ]
-	if { ($Ahc4(lowLimit) + 65536) > ($Pip - $Pbase) } {
-		set lowLimit $Ahc4(lowLimit)
+	set PlowPrefixPtr [ expr $Pbase + 65536 ]
+	if { 131072 > ($Pip - $Pbase) } {
+		set lowLimit 65536
 	} else {
 		set lowLimit [ expr $Pip - $Pbase ]
 	}
-	set PdictBase $Ahc4(PdictBase)
-	set matchIndex {}
 	set nbAttempts $maxNbAttempts
 	set delta [ expr $Pip - $PiLowLimit ]
 
@@ -322,14 +269,14 @@ proc LZ4HC_InsertAndGetWiderMatch_g { Pip PiLowLimit PiHighLimit longest \
 
 	while { ($matchIndex >= $lowLimit) && ($nbAttempts) } {
 		incr nbAttempts -1
-		if { $matchIndex >= $dictLimit } {
+		if { $matchIndex >= 65536 } {
 			set PmatchPtr [ expr $Pbase + $matchIndex ]
 			if { [ LZ4_read8o $PiLowLimit $longest ] == \
 				[ LZ4_read8 [ expr $PmatchPtr - $delta + $longest ] ] } {
 				if { [ LZ4_read32 $PmatchPtr ] == [ LZ4_read32 $Pip ] } {
-					set mlt [ expr $MINMATCH + [ LZ4_count \
-						[ expr $Pip + $MINMATCH ] \
-						[ expr $PmatchPtr + $MINMATCH ] $PiHighLimit ] ]
+					set mlt [ expr 4 + [ LZ4_count \
+						[ expr $Pip + 4 ] \
+						[ expr $PmatchPtr + 4 ] $PiHighLimit ] ]
 					set back 0
 
 					while { (($Pip + $back) > $PiLowLimit) \
@@ -349,17 +296,16 @@ proc LZ4HC_InsertAndGetWiderMatch_g { Pip PiLowLimit PiHighLimit longest \
 				}
 			}
 		} else {
-			set PmatchPtr [ expr $PdictBase + $matchIndex ]
+			set PmatchPtr [ expr $matchIndex - 65536 ]
 			if { [ LZ4_read32 $PmatchPtr ] == [ LZ4_read32 $Pip ] } {
-				set mlt {}
 				set back 0
-				set PvLimit [ expr $Pip + $dictLimit - $matchIndex ]
+				set PvLimit [ expr $Pip + 65536 - $matchIndex ]
 				if { $PvLimit > $PiHighLimit } { set PvLimit $PiHighLimit }
-				set mlt [ expr [ LZ4_count [ expr $Pip + $MINMATCH ] \
-					[ expr $PmatchPtr + $MINMATCH ] $PvLimit ] + $MINMATCH ]
+				set mlt [ expr [ LZ4_count [ expr $Pip + 4 ] \
+					[ expr $PmatchPtr + 4 ] $PvLimit ] + 4 ]
 				if { (($Pip + $mlt) == $PvLimit) && ($PvLimit < $PiHighLimit) } {
 					incr mlt [ LZ4_count [ expr $Pip + $mlt ] \
-						[ expr $Pbase + $dictLimit ] $PiHighLimit ]
+						[ expr $Pbase + 65536 ] $PiHighLimit ]
 				}
 				while { (($Pip + $back) > $PiLowLimit) \
 					&& (($matchIndex + $back) > $lowLimit) \
@@ -381,36 +327,24 @@ proc LZ4HC_InsertAndGetWiderMatch_g { Pip PiLowLimit PiHighLimit longest \
 	return $longest
 }
 
-set noLimit 0
-set limitedOutput 1
-
 proc LZ4HC_encodeSequence_nl { RPip RPop RPanchor matchLength Pmatch } {
-	global LASTLITERALS RUN_MASK ML_BITS MINMATCH ML_MASK
 	upvar $RPip Pip $RPop Pop $RPanchor Panchor
-	set length {}
-	set Ptoken {}
-	set token {}
 
-	if { 0 } {
-		puts "literal : [ expr $Pip - $Panchor \
-			]  --  match : $matchLength  --  offset : [ expr $Pip - $Pmatch ]"
-	}
+	# puts "literal : [ expr $Pip - $Panchor \
+		]  --  match : $matchLength  --  offset : [ expr $Pip - $Pmatch ]"
 
 	# Encode Literal Length
 	set length [ expr $Pip - $Panchor ]
 	set Ptoken $Pop; incr Pop
-	if { $length >= $RUN_MASK } {
-		set len {}
-		# LZ4_write8 $Ptoken [ expr $RUN_MASK << $ML_BITS ]
-		set token [ expr $RUN_MASK << $ML_BITS ]
-		set len [ expr $length - $RUN_MASK ]
+	if { $length >= 15 } {
+		set token [ expr 15 << 4 ]
+		set len [ expr $length - 15 ]
 		for {} { $len > 254 } { incr len -255 } {
 			LZ4_write8 $Pop 255; incr Pop
 		}
 		LZ4_write8 $Pop $len; incr Pop
 	} else {
-		# LZ4_write8 $Ptoken [ expr $length << $ML_BITS ]
-		set token [ expr $length << $ML_BITS ]
+		set token [ expr $length << 4 ]
 	}
 
 	# Copy Literals
@@ -421,11 +355,10 @@ proc LZ4HC_encodeSequence_nl { RPip RPop RPanchor matchLength Pmatch } {
 	LZ4_writeLE16 $Pop [ expr $Pip - $Pmatch ]; incr Pop 2
 
 	# Encode MatchLength
-	set length [ expr $matchLength - $MINMATCH ]
-	if { $length >= $ML_MASK } {
-		# LZ4_write8 $Ptoken [ expr [ LZ4_read8 $Ptoken ] + $ML_MASK ]
-		LZ4_write8 $Ptoken [ expr $token + $ML_MASK ]
-		incr length -$ML_MASK
+	set length [ expr $matchLength - 4 ]
+	if { $length >= 15 } {
+		LZ4_write8 $Ptoken [ expr $token + 15 ]
+		incr length -15
 		for {} { $length > 509 } { incr length -510 } {
 			LZ4_write8 $Pop 255; incr Pop
 			LZ4_write8 $Pop 255; incr Pop
@@ -436,7 +369,6 @@ proc LZ4HC_encodeSequence_nl { RPip RPop RPanchor matchLength Pmatch } {
 		}
 		LZ4_write8 $Pop $length; incr Pop
 	} else {
-		# LZ4_write8 $Ptoken [ expr [ LZ4_read8 $Ptoken ] + $length ]
 		LZ4_write8 $Ptoken [ expr $token + $length ]
 	}
 
@@ -448,15 +380,14 @@ proc LZ4HC_encodeSequence_nl { RPip RPop RPanchor matchLength Pmatch } {
 }
 
 proc LZ4HC_compress_generic_g_nl { inputSize compressionLevel } {
-	global MFLIMIT LASTLITERALS LZ4HC_MAX_CLEVEL LZ4HC_DEFAULT_CLEVEL \
-		OPTIMAL_ML MINMATCH ML_MASK RUN_MASK ML_BITS
+	global LZ4HC_MAX_CLEVEL LZ4HC_DEFAULT_CLEVEL
 	upvar #0 Ahc4 Actx
 
 	set Pip 0
 	set Panchor $Pip
 	set Piend [ expr $Pip + $inputSize ]
-	set Pmflimit [ expr $Piend - $MFLIMIT ]
-	set Pmatchlimit [ expr $Piend - $LASTLITERALS ]
+	set Pmflimit [ expr $Piend - 12 ]
+	set Pmatchlimit [ expr $Piend - 5 ]
 
 	set Pop 0
 
@@ -531,11 +462,11 @@ proc LZ4HC_compress_generic_g_nl { inputSize compressionLevel } {
 				# Currently we have :
 				# ml2 > ml1, and
 				# ip1+3 <= ip2 (usually < ip1+ml1)
-				if { ($Pstart2 - $Pip) < $OPTIMAL_ML } {
+				if { ($Pstart2 - $Pip) < 18 } {
 					set new_ml $ml
-					if { $new_ml > $OPTIMAL_ML } { set new_ml $OPTIMAL_ML }
-					if { ($Pip + $new_ml) > ($Pstart2 + $ml2 + $MINMATCH) } {
-						set new_ml [ expr ($Pstart2 - $Pip) + $ml2 - $MINMATCH ]
+					if { $new_ml > 18 } { set new_ml 18 }
+					if { ($Pip + $new_ml) > ($Pstart2 + $ml2 + 4) } {
+						set new_ml [ expr ($Pstart2 - $Pip) + $ml2 - 4 ]
 					}
 					set correction [ expr $new_ml - ($Pstart2 - $Pip) ]
 					if { $correction > 0 } {
@@ -578,7 +509,7 @@ proc LZ4HC_compress_generic_g_nl { inputSize compressionLevel } {
 							incr Pstart2 $correction
 							incr Pref2 $correction
 							incr ml2 -$correction
-							if { $ml2 < $MINMATCH } {
+							if { $ml2 < 4 } {
 								set Pstart2 $Pstart3
 								set Pref2 $Pref3
 								set ml2 $ml3
@@ -610,10 +541,10 @@ proc LZ4HC_compress_generic_g_nl { inputSize compressionLevel } {
 				# OK, now we have 3 ascending matches; let's write at least the first one
 				# ip & ref are known; Now for ml
 				if { $Pstart2 < ($Pip + $ml) } {
-					if { ($Pstart2 - $Pip) < $ML_MASK } {
-						if { $ml > $OPTIMAL_ML } { set ml $OPTIMAL_ML }
-						if { ($Pip + $ml) > ($Pstart2 + $ml2 - $MINMATCH) } {
-							set ml [ expr ($Pstart2 - $Pip) + $ml2 - $MINMATCH ]
+					if { ($Pstart2 - $Pip) < 15 } {
+						if { $ml > 18 } { set ml 18 }
+						if { ($Pip + $ml) > ($Pstart2 + $ml2 - 4) } {
+							set ml [ expr ($Pstart2 - $Pip) + $ml2 - 4 ]
 						}
 						set correction [ expr $ml - ($Pstart2 - $Pip) ]
 						if { $correction > 0 } {
@@ -648,15 +579,15 @@ proc LZ4HC_compress_generic_g_nl { inputSize compressionLevel } {
 
 	# Encode Last Literals
 	set lastRun [ expr $Piend - $Panchor ]
-	if { $lastRun >= $RUN_MASK } {
-		LZ4_write8 $Pop [ expr $RUN_MASK << $ML_BITS ]; incr Pop
-		incr lastRun -$RUN_MASK
+	if { $lastRun >= 15 } {
+		LZ4_write8 $Pop [ expr 15 << 4 ]; incr Pop
+		incr lastRun -15
 		for {} { $lastRun > 254 } { incr lastRun -255 } {
 			LZ4_write8 $Pop 255; incr Pop
 		}
 		LZ4_write8 $Pop $lastRun; incr Pop
 	} else {
-		LZ4_write8 $Pop [ expr $lastRun << $ML_BITS ]; incr Pop
+		LZ4_write8 $Pop [ expr $lastRun << 4 ]; incr Pop
 	}
 	LZ4_memmove $Pop $Panchor [ expr $Piend - $Panchor ]
 	incr Pop [ expr $Piend - $Panchor ]
@@ -665,15 +596,17 @@ proc LZ4HC_compress_generic_g_nl { inputSize compressionLevel } {
 	return $Pop
 }
 
-proc LZ4_compress_HC_tcl { src maxDstSize compressionLevel } {
-	global HEAP_IN32 HEAP_OUT8
+proc LZ4_compress { src { compressionLevel 0 } } {
+	global HEAP_IN8 HEAP_IN32 HEAP_OUT8
 	set srcSize [ string length $src ]
 
 	# Allocate input heap
+	array set HEAP_IN8 [ list ]
 	array set HEAP_IN32 [ list ]
 	binary scan "$src\0\0\0" H* srcHex
-	for { set i 0; set j 0; set k 7 } { $i < $srcSize } { incr i; incr j 2; incr k 2 } {
-		set HEAP_IN32($i) [ expr 0x[ string range $srcHex $j $k ] ]
+	for { set i 0 } { $i < $srcSize } { incr i } {
+		set HEAP_IN8($i) [ expr 0x[ string range $srcHex [ expr $i * 2 ] [ expr $i * 2 + 1 ] ] ]
+		set HEAP_IN32($i) [ expr 0x[ string range $srcHex [ expr $i * 2 ] [ expr $i * 2 + 7 ] ] ]
 	}
 
 	# Allocate output heap
