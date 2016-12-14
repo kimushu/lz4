@@ -55,86 +55,85 @@ set LZ4HC_HASH_MASK [ expr ($LZ4HC_HASHTABLESIZE - 1) ]
 #
 
 proc LZ4_read8 { Pptr } {
-	global HEAP_IN8
-	return $HEAP_IN8($Pptr)
+	global LZ4_hi8
+	return $LZ4_hi8($Pptr)
 }
 
 proc LZ4_read8o { Pptr ofs } {
-	global HEAP_IN8
-	return $HEAP_IN8([ expr $Pptr + $ofs ])
+	global LZ4_hi8
+	return $LZ4_hi8([ expr $Pptr + $ofs ])
 }
 
 proc LZ4_read16 { Pptr } {
 	# This procedure reads 16-bit data as big-endian
-	global HEAP_IN32
-	return [ expr $HEAP_IN32($Pptr) >> 16 ]
+	global LZ4_hi32
+	return [ expr $LZ4_hi32($Pptr) >> 16 ]
 }
 
 proc LZ4_read32 { Pptr } {
 	# This procedure reads 32-bit data as big-endian
-	global HEAP_IN32
-	return [ expr $HEAP_IN32($Pptr) ]
+	global LZ4_hi32
+	return [ expr $LZ4_hi32($Pptr) ]
 }
 
 proc LZ4_memmove { Pdest Psrc n } {
-	global HEAP_IN32 HEAP_OUT8
+	global LZ4_hi32 LZ4_ho8
 	for {} { $n >= 4 } { incr n -4 } {
-		set v $HEAP_IN32($Psrc); incr Psrc 4
-		set HEAP_OUT8($Pdest) [ expr ($v >> 24) & 0xff ]; incr Pdest
-		set HEAP_OUT8($Pdest) [ expr ($v >> 16) & 0xff ]; incr Pdest
-		set HEAP_OUT8($Pdest) [ expr ($v >>  8) & 0xff ]; incr Pdest
-		set HEAP_OUT8($Pdest) [ expr  $v        & 0xff ]; incr Pdest
+		set v $LZ4_hi32($Psrc); incr Psrc 4
+		set LZ4_ho8($Pdest) [ expr ($v >> 24) & 0xff ]; incr Pdest
+		set LZ4_ho8($Pdest) [ expr ($v >> 16) & 0xff ]; incr Pdest
+		set LZ4_ho8($Pdest) [ expr ($v >>  8) & 0xff ]; incr Pdest
+		set LZ4_ho8($Pdest) [ expr  $v        & 0xff ]; incr Pdest
 	}
 	if { $n > 0 } {
-		set v $HEAP_IN32($Psrc)
-		set HEAP_OUT8($Pdest) [ expr ($v >> 24) & 0xff ]; incr Pdest
+		set v $LZ4_hi32($Psrc)
+		set LZ4_ho8($Pdest) [ expr ($v >> 24) & 0xff ]; incr Pdest
 		if { $n == 1 } { return {} }
-		set HEAP_OUT8($Pdest) [ expr ($v >> 16) & 0xff ]; incr Pdest
+		set LZ4_ho8($Pdest) [ expr ($v >> 16) & 0xff ]; incr Pdest
 		if { $n == 2 } { return {} }
-		set HEAP_OUT8($Pdest) [ expr ($v >>  8) & 0xff ]
+		set LZ4_ho8($Pdest) [ expr ($v >>  8) & 0xff ]
 	}
 	return {}
 }
 
 proc LZ4_write8 { Pptr val } {
-	global HEAP_OUT8
-	set HEAP_OUT8($Pptr) [ expr $val & 0xff ]
+	global LZ4_ho8
+	set LZ4_ho8($Pptr) [ expr $val & 0xff ]
 	return {}
 }
 
 proc LZ4_writeLE16 { Pptr val } {
-	global HEAP_OUT8
-	set HEAP_OUT8($Pptr) [ expr $val & 0xff ]
+	global LZ4_ho8
+	set LZ4_ho8($Pptr) [ expr $val & 0xff ]
 	incr Pptr
-	set HEAP_OUT8($Pptr) [ expr ($val >> 8) & 0xff ]
+	set LZ4_ho8($Pptr) [ expr ($val >> 8) & 0xff ]
 	return {}
 }
 
-proc LZ4_NbCommonBytes { val } {
-	if { $val & 0xff000000 } {
-		return 0
-	} elseif { $val & 0xff0000 } {
-		return 1
-	} elseif { $val & 0xff00 } {
-		return 2
-	} else {
-		return 3
-	}
-}
-
 proc LZ4_count { Pin Pmatch PinLimit } {
+	global LZ4_hi32 LZ4_hi8
 	set Pstart $Pin
 	while { $Pin < ($PinLimit - 3) } {
-		set diff [ expr [ LZ4_read32 $Pmatch ] ^ [ LZ4_read32 $Pin ] ]
-		if { !$diff } { incr Pin 4; incr Pmatch 4; continue }
-		incr Pin [ LZ4_NbCommonBytes $diff ]
+		set diff [ expr $LZ4_hi32($Pmatch) ^ $LZ4_hi32($Pin) ]
+		if { !$diff } {
+			incr Pin 4
+			incr Pmatch 4
+			continue
+		} elseif { $diff & 0xff000000 } {
+		} elseif { $diff & 0xff0000 } {
+			incr Pin
+		} elseif { $diff & 0xff00 } {
+			incr Pin 2
+		} elseif { $diff & 0xff } {
+			incr Pin 3
+		}
 		return [ expr $Pin - $Pstart ]
 	}
 
-	if { ($Pin < ($PinLimit - 1)) && ( [ LZ4_read16 $Pmatch ] == [ LZ4_read16 $Pin ] ) } {
+	if { ($Pin < ($PinLimit - 1)) && !( ($LZ4_hi32($Pmatch) ^ $LZ4_hi32($Pin)) >> 16 ) } {
 		incr Pin 2; incr Pmatch 2
 	}
-	if { ($Pin < $PinLimit) && ( [ LZ4_read8 $Pmatch ] == [ LZ4_read8 $Pin ] ) } {
+	if { ($Pin < $PinLimit) && ( $LZ4_hi8($Pmatch) == $LZ4_hi8($Pin) ) } {
 		incr Pin
 	}
 	return [ expr $Pin - $Pstart ]
@@ -145,8 +144,8 @@ proc LZ4_count { Pin Pmatch PinLimit } {
 #
 
 proc LZ4HC_hashPtr { Pptr } {
-	global HEAP_IN32
-	return [ expr (($HEAP_IN32($Pptr) * 2654435761) >> 17) & 32767 ]
+	global LZ4_hi32
+	return [ expr (($LZ4_hi32($Pptr) * 2654435761) >> 17) & 32767 ]
 }
 
 proc LZ4HC_init_g {} {
@@ -369,6 +368,7 @@ proc LZ4HC_encodeSequence_nl { RPip RPop RPanchor matchLength Pmatch } {
 
 proc LZ4HC_compress_generic_g_nl { inputSize compressionLevel } {
 	global LZ4HC_MAX_CLEVEL LZ4HC_DEFAULT_CLEVEL
+	global LZ4_hi8 LZ4_hi32
 
 	set Pip 0
 	set Panchor $Pip
@@ -583,20 +583,20 @@ proc LZ4HC_compress_generic_g_nl { inputSize compressionLevel } {
 }
 
 proc LZ4_compress { src { compressionLevel 0 } } {
-	global HEAP_IN8 HEAP_IN32 HEAP_OUT8
+	global LZ4_hi8 LZ4_hi32 LZ4_ho8
 	set srcSize [ string length $src ]
 
 	# Allocate input heap
-	array set HEAP_IN8 [ list ]
-	array set HEAP_IN32 [ list ]
+	array set LZ4_hi8 [ list ]
+	array set LZ4_hi32 [ list ]
 	binary scan "$src\0\0\0" H* srcHex
 	for { set i 0 } { $i < $srcSize } { incr i } {
-		set HEAP_IN8($i) [ expr 0x[ string range $srcHex [ expr $i * 2 ] [ expr $i * 2 + 1 ] ] ]
-		set HEAP_IN32($i) [ expr 0x[ string range $srcHex [ expr $i * 2 ] [ expr $i * 2 + 7 ] ] ]
+		set LZ4_hi8($i) [ expr 0x[ string range $srcHex [ expr $i * 2 ] [ expr $i * 2 + 1 ] ] ]
+		set LZ4_hi32($i) [ expr 0x[ string range $srcHex [ expr $i * 2 ] [ expr $i * 2 + 7 ] ] ]
 	}
 
 	# Allocate output heap
-	array set HEAP_OUT8 [ list ]
+	array set LZ4_ho8 [ list ]
 
 	# Initialize context
 	LZ4HC_init_g
@@ -613,14 +613,14 @@ proc LZ4_compress { src { compressionLevel 0 } } {
 	for { set i 0 } { $i < $len } { incr i $BLKSZ } {
 		set tmp {}
 		for { set j $i } { ($j < $len) && ($j < ($i + $BLKSZ)) } { incr j } {
-			set tmp "$tmp[ binary format c $HEAP_OUT8($j) ]"
+			set tmp "$tmp[ binary format c $LZ4_ho8($j) ]"
 		}
 		set result "$result$tmp"
 	}
 
 	# Release heap
-	unset HEAP_IN32
-	unset HEAP_OUT8
+	unset LZ4_hi32
+	unset LZ4_ho8
 
 	return $result
 }
